@@ -9,9 +9,11 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -39,8 +41,7 @@ func (a *apps) setApps(app []Datatypes.Application) {
 
 
 func handleTunneling(w http.ResponseWriter, r *http.Request) {
-	spew.Dump(r)
-	log.Println("Called tunnel")
+	checkForLocalMatch(r)
 	dest_conn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
@@ -67,9 +68,7 @@ func transfer(destination io.WriteCloser, source io.ReadCloser) {
 }
 
 func handleHTTP(w http.ResponseWriter, req *http.Request) {
-	spew.Dump(applicationList.applications)
-	spew.Dump(req)
-	log.Println("Called HTTP")
+	checkForLocalMatch(req)
 	resp, err := http.DefaultTransport.RoundTrip(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
@@ -110,7 +109,8 @@ func main() {
 
 func appWatcher() {
 	for {
-		resp, err := getRequest("host.docker.internal:14440/applications")
+		time.Sleep(5 * time.Second)
+		resp, err := getRequest("http://host.docker.internal:14440/applications")
 		if err != nil {
 			log.Println("Error fetching applications: ", err.Error())
 			continue
@@ -119,6 +119,7 @@ func appWatcher() {
 		var a []Datatypes.Application
 		if err = json.Unmarshal(resp, &a); err != nil {
 			log.Println("Error unmarshalling json response: ", err.Error())
+			continue
 		}
 		applicationList.setApps(a)
 	}
@@ -142,4 +143,64 @@ func getRequest(address string) ([]byte, error) {
 	}
 
 	return body, nil
+}
+
+func checkForLocalMatch(r *http.Request) {
+	appCopy := applicationList.getApps()
+	_, err := net.LookupIP(r.Host)
+	if err == nil {
+		//we're not needed here
+		return
+	}
+
+	app, err := getMatchingApplication(appCopy, r.RemoteAddr)
+	if err != nil {
+		log.Println(err)
+		log.Println("Can't find what application this request came from. Let's just give up and report the HTTP error")
+		spew.Dump(appCopy)
+		spew.Dump(r.RemoteAddr)
+		return
+	}
+	IPs := findValidIPs(app, appCopy, r.Host)
+	if len(IPs) == 0 {
+		log.Println("No valid IPs for ", r.Host)
+		return
+	}
+	println("Found local IPs: ", IPs, " for ", r.Host)
+	randomIP := rand.Intn(len(IPs))
+	r.RequestURI = strings.Replace(r.RequestURI, r.Host, IPs[randomIP], 1)
+	r.Host = IPs[randomIP]
+}
+
+func getMatchingApplication(apps []Datatypes.Application, address string) (Datatypes.Application, error) {
+	split := strings.Split(address, ":")
+	if len(split) != 2 {
+		return Datatypes.Application{}, errors.New("address should be in the form IP:PORT")
+	}
+	for _, app := range apps {
+		for _, comp := range app.Components {
+			for _, netw := range comp.NetworkInfo {
+				for _, v := range netw {
+					if v == split[0] {
+						return app, nil
+					}
+				}
+			}
+		}
+	}
+	return Datatypes.Application{}, errors.New("could not find app")
+}
+
+func findValidIPs(application Datatypes.Application, apps []Datatypes.Application, hostname string) []string {
+	for _, comp := range application.Components {
+		if comp.Name == hostname {
+			var ret []string
+			for _, v := range comp.NetworkInfo {
+				ret = append(ret, v...)
+			}
+			return ret
+		}
+	}
+	//TODO local applications outside of the implicit network
+	return []string{}
 }
