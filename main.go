@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 )
 
 var applicationList apps
+var hostCheck string
 
 type apps struct {
 	sync.Mutex
@@ -42,7 +44,7 @@ func (a *apps) setApps(app []Datatypes.Application) {
 
 
 func handleTunneling(w http.ResponseWriter, r *http.Request) {
-	checkForLocalMatch(r)
+	//checkForLocalMatch(r)
 	dest_conn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
@@ -69,7 +71,25 @@ func transfer(destination io.WriteCloser, source io.ReadCloser) {
 }
 
 func handleHTTP(w http.ResponseWriter, req *http.Request) {
-	checkForLocalMatch(req)
+	_, err := net.LookupIP(req.Host)
+	if err != nil {
+		//Try to find the container which made the request
+		appCopy := applicationList.getApps()
+
+		app, err := getMatchingApplication(appCopy, req.RemoteAddr)
+		if err != nil {
+			log.Println(err)
+			log.Println("Can't find what application this request came from. Let's just give up and report the HTTP error")
+
+		} else {
+			//try to rewrite the URL with a local match
+			if !checkForLocalMatch(req, app, appCopy) {
+				//If that fails, check for a remote match
+				checkForRemoteMatch(req, app, appCopy)
+			}
+		}
+	}
+	//Try to execute to query, no matter what the final request is
 	resp, err := http.DefaultTransport.RoundTrip(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
@@ -90,6 +110,11 @@ func copyHeader(dst, src http.Header) {
 }
 
 func main() {
+	host := os.Getenv("AGOGOS_HOSTNAME")
+	if host == "" {
+		panic("AGOGOS_HOSTNAME not set. Exiting")
+	}
+	hostCheck = host
 	server := &http.Server{
 		Addr: ":8888",
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -146,25 +171,11 @@ func getRequest(address string) ([]byte, error) {
 	return body, nil
 }
 
-func checkForLocalMatch(r *http.Request) {
-	appCopy := applicationList.getApps()
-	_, err := net.LookupIP(r.Host)
-	if err == nil {
-		//we're not needed here
-		return
-	}
-
-	app, err := getMatchingApplication(appCopy, r.RemoteAddr)
-	if err != nil {
-		log.Println(err)
-		log.Println("Can't find what application this request came from. Let's just give up and report the HTTP error")
-		return
-	}
-
-	IPs := findValidIPs(app, appCopy, r.Host)
+func checkForLocalMatch(r *http.Request, app Datatypes.Application, allApps []Datatypes.Application) bool {
+	IPs := findValidIPs(app, allApps, r.Host)
 	if len(IPs) == 0 {
 		log.Println("No valid IPs for ", r.Host)
-		return
+		return false
 	}
 	var validIPs []string
 	for _, IP := range IPs {
@@ -195,9 +206,11 @@ func checkForLocalMatch(r *http.Request) {
 	if err != nil {
 		log.Println(err)
 		log.Println("Could not form new URL for proxied request")
+		return false
 	}
 	r.URL = newURL
 	r.Host = r.URL.Host
+	return true
 }
 
 func getMatchingApplication(apps []Datatypes.Application, address string) (Datatypes.Application, error) {
@@ -210,7 +223,9 @@ func getMatchingApplication(apps []Datatypes.Application, address string) (Datat
 			for _, netw := range comp.NetworkInfo {
 				for _, v := range netw {
 					if v == split[0] {
-						return app, nil
+						if app.Node == hostCheck {
+							return app, nil
+						}
 					}
 				}
 			}
@@ -221,10 +236,11 @@ func getMatchingApplication(apps []Datatypes.Application, address string) (Datat
 
 func findValidIPs(application Datatypes.Application, apps []Datatypes.Application, hostname string) []string {
 	//Check the implicit networks
+	var ret []string
 	for _, comp := range application.Components {
 		if comp.Name == hostname {
 			//This proxy has to be able to access the network so we pick the Bridge IP
-			return comp.NetworkInfo["bridge"]
+			ret = append(ret, comp.NetworkInfo["bridge"]...)
 		}
 	}
 
@@ -239,12 +255,12 @@ func findValidIPs(application Datatypes.Application, apps []Datatypes.Applicatio
 		if overlap(application.Networks, app.Networks) {
 			for _, comp := range app.Components {
 				if comp.Name == hostname {
-					return comp.NetworkInfo["bridge"]
+					ret = append(ret, comp.NetworkInfo["bridge"]...)
 				}
 			}
 		}
 	}
-	return []string{}
+	return ret
 }
 
 func overlap(a, b []string) bool {
@@ -269,4 +285,73 @@ func overlap(a, b []string) bool {
 		}
 	}
 	return false
+}
+
+func checkForRemoteMatch(r *http.Request, app Datatypes.Application, allApps []Datatypes.Application) {
+	hosts := findValidRemoteHosts(app, allApps, r.Host)
+	if len(hosts) == 0 {
+		log.Println("No valid hosts for ", r.Host)
+		return
+	}
+
+	var validHosts []string
+	for _, host := range hosts {
+		timeout := time.Duration(500 * time.Millisecond)
+		//Checking for a remote proxy here so don't honor the host
+		port := "14442"
+		_, err := net.DialTimeout("tcp",fmt.Sprintf("%s:%s", host, port), timeout)
+		if err != nil {
+			if strings.Contains(err.Error(), "i/o timeout") {
+				//If it's a timeout, we ignore this host and assume it's gone down, and try to pick another one
+				//we will allow all other errors as they could be requesting the wrong port etc
+				continue
+			}
+		}
+		validHosts = append(validHosts, host)
+	}
+
+	if len(validHosts) == 0 {
+		//If no hosts are valid then who cares, just pick one and give an error
+		validHosts = hosts
+	}
+
+	randomHost := validHosts[rand.Intn(len(validHosts))]
+	println("picked host: ", randomHost, " for ", r.Host)
+
+	oldPort := r.URL.Port()
+	if oldPort != "" {
+	} else {
+		oldPort = "80"
+	}
+	newUrl := strings.Replace(r.URL.String(), r.Host, randomHost+":14442", 1)
+	newURL, err := url.Parse(newUrl)
+	if err != nil {
+		log.Println(err)
+		log.Println("Could not form new URL for proxied request")
+		return
+	}
+	r.Header.Add("X-agogos-requested-port", oldPort)
+	r.URL = newURL
+	r.Host = r.URL.Host
+}
+
+func findValidRemoteHosts(application Datatypes.Application, apps []Datatypes.Application, hostname string) []string {
+	//Check for apps on a different node in the same network
+	var ret []string
+	for _, app := range apps {
+		if app.Name == application.Name {
+			continue
+		}
+		if app.Node == application.Node {
+			continue
+		}
+		if overlap(application.Networks, app.Networks) {
+			for _, comp := range app.Components {
+				if comp.Name == hostname {
+					ret = append(ret, app.Node)
+				}
+			}
+		}
+	}
+	return ret
 }
