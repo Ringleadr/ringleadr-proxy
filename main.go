@@ -4,14 +4,15 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/GodlikePenguin/agogos-datatypes"
-	"github.com/davecgh/go-spew/spew"
 	"io"
 	"io/ioutil"
 	"log"
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -157,19 +158,46 @@ func checkForLocalMatch(r *http.Request) {
 	if err != nil {
 		log.Println(err)
 		log.Println("Can't find what application this request came from. Let's just give up and report the HTTP error")
-		spew.Dump(appCopy)
-		spew.Dump(r.RemoteAddr)
 		return
 	}
+
 	IPs := findValidIPs(app, appCopy, r.Host)
 	if len(IPs) == 0 {
 		log.Println("No valid IPs for ", r.Host)
 		return
 	}
-	println("Found local IPs: ", IPs, " for ", r.Host)
-	randomIP := rand.Intn(len(IPs))
-	r.RequestURI = strings.Replace(r.RequestURI, r.Host, IPs[randomIP], 1)
-	r.Host = IPs[randomIP]
+	var validIPs []string
+	for _, IP := range IPs {
+		timeout := time.Duration(500 * time.Millisecond)
+		port := r.URL.Port()
+		if port == "" {
+			port = "80"
+		}
+		_, err := net.DialTimeout("tcp",fmt.Sprintf("%s:%s", IP, port), timeout)
+		if err != nil {
+			if strings.Contains(err.Error(), "i/o timeout") {
+				//If it's a timeout, we ignore this IP and assume it's gone down, and try to pick another one
+				//we will allow all other errors as they could be requesting the wrong port etc
+				continue
+			}
+		}
+		validIPs = append(validIPs, IP)
+	}
+
+	if len(validIPs) == 0 {
+		//If no IPs are valid then who cares, just pick one and give an error
+		validIPs = IPs
+	}
+
+	randomIP := validIPs[rand.Intn(len(validIPs))]
+	println("picked IP: ", randomIP, " for ", r.Host)
+	newURL, err := url.Parse(strings.Replace(r.URL.String(), r.Host, randomIP, 1))
+	if err != nil {
+		log.Println(err)
+		log.Println("Could not form new URL for proxied request")
+	}
+	r.URL = newURL
+	r.Host = r.URL.Host
 }
 
 func getMatchingApplication(apps []Datatypes.Application, address string) (Datatypes.Application, error) {
@@ -192,15 +220,53 @@ func getMatchingApplication(apps []Datatypes.Application, address string) (Datat
 }
 
 func findValidIPs(application Datatypes.Application, apps []Datatypes.Application, hostname string) []string {
+	//Check the implicit networks
 	for _, comp := range application.Components {
 		if comp.Name == hostname {
-			var ret []string
-			for _, v := range comp.NetworkInfo {
-				ret = append(ret, v...)
-			}
-			return ret
+			//This proxy has to be able to access the network so we pick the Bridge IP
+			return comp.NetworkInfo["bridge"]
 		}
 	}
-	//TODO local applications outside of the implicit network
+
+	//Check for apps on the same node in the same network
+	for _, app := range apps {
+		if app.Name == application.Name {
+			continue
+		}
+		if app.Node != application.Node {
+			continue
+		}
+		if overlap(application.Networks, app.Networks) {
+			for _, comp := range app.Components {
+				if comp.Name == hostname {
+					return comp.NetworkInfo["bridge"]
+				}
+			}
+		}
+	}
 	return []string{}
+}
+
+func overlap(a, b []string) bool {
+	for _, i := range a {
+		if i == "bridge" {
+			continue
+		}
+		for _, j := range b {
+			if i == j {
+				return true
+			}
+		}
+	}
+	for _, i := range b {
+		if i == "bridge" {
+			continue
+		}
+		for _, j := range a {
+			if i == j {
+				return true
+			}
+		}
+	}
+	return false
 }
