@@ -7,4 +7,6 @@ before_install:
   - go get github.com/GodlikePenguin/agogos-datatypes
 script:
   - ./build.sh
-  - docker push edwarddobson/agogos-proxy:$(git rev-parse --short HEAD)
+  - TAG=$(git rev-parse --short HEAD)
+  - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+  - docker push edwarddobson/agogos-proxy:$TAG
