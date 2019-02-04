@@ -21,6 +21,7 @@ import (
 )
 
 var applicationList apps
+var hostMap concurrentMap
 var hostCheck string
 
 type apps struct {
@@ -39,6 +40,24 @@ func (a *apps) setApps(app []Datatypes.Application) {
 	a.Lock()
 	a.applications = app
 	a.Unlock()
+}
+
+type concurrentMap struct {
+	sync.Mutex
+	hosts map[string]string
+}
+
+func (c *concurrentMap) getHosts() map[string]string {
+	c.Lock()
+	hosts := c.hosts
+	c.Unlock()
+	return hosts
+}
+
+func (c *concurrentMap) setHosts(newHosts map[string]string) {
+	c.Lock()
+	c.hosts = newHosts
+	c.Unlock()
 }
 
 
@@ -89,6 +108,7 @@ func handleHTTP(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 	}
+	log.Println("Using request URL:", req.URL.String())
 	//Try to execute to query, no matter what the final request is
 	resp, err := http.DefaultTransport.RoundTrip(req)
 	if err != nil {
@@ -148,6 +168,25 @@ func appWatcher() {
 			continue
 		}
 		applicationList.setApps(a)
+
+		resp, err = getRequest("http://host.docker.internal:14440/nodes")
+		if err != nil {
+			log.Println("Error fetching nodes: ", err.Error())
+			continue
+		}
+
+		var n []Datatypes.Node
+		if err = json.Unmarshal(resp, &n); err != nil {
+			log.Println("Error unmarshalling json response: ", err.Error())
+			continue
+		}
+		hMap := make(map[string]string)
+		for _, no := range n {
+			if no.Active {
+				hMap[no.Name] = no.Address
+			}
+		}
+		hostMap.setHosts(hMap)
 	}
 }
 
@@ -174,7 +213,7 @@ func getRequest(address string) ([]byte, error) {
 func checkForLocalMatch(r *http.Request, app Datatypes.Application, allApps []Datatypes.Application) bool {
 	IPs := findValidIPs(app, allApps, r.Host)
 	if len(IPs) == 0 {
-		log.Println("No valid IPs for ", r.Host)
+		log.Println("No valid local IPs for ", r.Host)
 		return false
 	}
 	var validIPs []string
@@ -288,18 +327,18 @@ func overlap(a, b []string) bool {
 }
 
 func checkForRemoteMatch(r *http.Request, app Datatypes.Application, allApps []Datatypes.Application) {
-	hosts := findValidRemoteHosts(app, allApps, r.Host)
-	if len(hosts) == 0 {
-		log.Println("No valid hosts for ", r.Host)
+	remoteApps := findValidRemoteApps(app, allApps, r.Host)
+	if len(remoteApps) == 0 {
+		log.Println("No valid remoteApps for ", r.Host)
 		return
 	}
 
-	var validHosts []string
-	for _, host := range hosts {
+	var validApps []Datatypes.Application
+	for _, appl := range remoteApps {
 		timeout := time.Duration(500 * time.Millisecond)
 		//Checking for a remote proxy here so don't honor the host
 		port := "14442"
-		_, err := net.DialTimeout("tcp",fmt.Sprintf("%s:%s", host, port), timeout)
+		_, err := net.DialTimeout("tcp",fmt.Sprintf("%s:%s", ipForHost(appl.Node), port), timeout)
 		if err != nil {
 			if strings.Contains(err.Error(), "i/o timeout") {
 				//If it's a timeout, we ignore this host and assume it's gone down, and try to pick another one
@@ -307,37 +346,42 @@ func checkForRemoteMatch(r *http.Request, app Datatypes.Application, allApps []D
 				continue
 			}
 		}
-		validHosts = append(validHosts, host)
+		validApps = append(validApps, appl)
 	}
 
-	if len(validHosts) == 0 {
-		//If no hosts are valid then who cares, just pick one and give an error
-		validHosts = hosts
+	if len(validApps) == 0 {
+		//If no remoteApps are valid then who cares, just pick one and give an error
+		validApps = remoteApps
 	}
 
-	randomHost := validHosts[rand.Intn(len(validHosts))]
-	println("picked host: ", randomHost, " for ", r.Host)
+	randomApp := validApps[rand.Intn(len(validApps))]
+	println("picked node: ", randomApp.Node, " for ", r.Host)
 
 	oldPort := r.URL.Port()
 	if oldPort != "" {
 	} else {
 		oldPort = "80"
 	}
-	newUrl := strings.Replace(r.URL.String(), r.Host, randomHost+":14442", 1)
-	newURL, err := url.Parse(newUrl)
+	requestedHostname := r.URL.Host
+	if strings.Contains(requestedHostname, ":") {
+		requestedHostname = strings.Split(requestedHostname, ":")[0]
+	}
+	origRequest := r.URL.String()
+	newURL, err := url.Parse(fmt.Sprintf("http://%s:%s/%s/%s", ipForHost(randomApp.Node), "14442", randomApp.Name, requestedHostname))
 	if err != nil {
 		log.Println(err)
 		log.Println("Could not form new URL for proxied request")
 		return
 	}
 	r.Header.Add("X-agogos-requested-port", oldPort)
+	r.Header.Add("X-agogos-query", origRequest)
 	r.URL = newURL
 	r.Host = r.URL.Host
 }
 
-func findValidRemoteHosts(application Datatypes.Application, apps []Datatypes.Application, hostname string) []string {
+func findValidRemoteApps(application Datatypes.Application, apps []Datatypes.Application, hostname string) []Datatypes.Application {
 	//Check for apps on a different node in the same network
-	var ret []string
+	var ret []Datatypes.Application
 	for _, app := range apps {
 		if app.Name == application.Name {
 			continue
@@ -348,10 +392,14 @@ func findValidRemoteHosts(application Datatypes.Application, apps []Datatypes.Ap
 		if overlap(application.Networks, app.Networks) {
 			for _, comp := range app.Components {
 				if comp.Name == hostname {
-					ret = append(ret, app.Node)
+					ret = append(ret, app)
 				}
 			}
 		}
 	}
 	return ret
+}
+
+func ipForHost(hostname string) string {
+	return hostMap.getHosts()[hostname]
 }
