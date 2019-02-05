@@ -10,3 +10,5 @@ script:
   - TAG=$(git rev-parse --short HEAD)
   - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
   - docker push edwarddobson/agogos-proxy:$TAG
+  - docker tag edwarddobson/agogos-proxy:$TAG edwarddobson/agogos-proxy:latest
+  - docker push edwarddobson/agogos-proxy:latest
