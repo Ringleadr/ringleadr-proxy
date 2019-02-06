@@ -62,9 +62,26 @@ func (c *concurrentMap) setHosts(newHosts map[string]string) {
 
 
 
-func handleTunneling(w http.ResponseWriter, r *http.Request) {
-	//checkForLocalMatch(r)
-	dest_conn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
+func handleTunneling(w http.ResponseWriter, req *http.Request) {
+	_, err := net.LookupIP(req.Host)
+	if err != nil {
+		//Try to find the container which made the request
+		appCopy := applicationList.getApps()
+
+		app, err := getMatchingApplication(appCopy, req.RemoteAddr)
+		if err != nil {
+			log.Println(err)
+			log.Println("Can't find what application this request came from. Let's just give up and report the HTTP error")
+
+		} else {
+			//try to rewrite the URL with a local match
+			if !checkForLocalMatch(req, app, appCopy) {
+				//If that fails, check for a remote match
+				checkForRemoteMatch(req, app, appCopy)
+			}
+		}
+	}
+	dest_conn, err := net.DialTimeout("tcp", req.Host, 10*time.Second)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -191,7 +208,15 @@ func appWatcher() {
 }
 
 func getRequest(address string) ([]byte, error) {
-	resp, err := http.Get(address)
+	req, err := http.NewRequest(http.MethodGet, address, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("X-agogos-disable-log", "true")
+
+	client := http.Client{}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
