@@ -86,6 +86,7 @@ func handleTunneling(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
+	w.Header().Add("proxy-chosen-ip", req.URL.Hostname())
 	w.WriteHeader(http.StatusOK)
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
@@ -134,6 +135,7 @@ func handleHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	defer resp.Body.Close()
 	copyHeader(w.Header(), resp.Header)
+	w.Header().Add("proxy-chosen-ip", req.URL.Hostname())
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }
@@ -236,9 +238,9 @@ func getRequest(address string) ([]byte, error) {
 }
 
 func checkForLocalMatch(r *http.Request, app Datatypes.Application, allApps []Datatypes.Application) bool {
-	IPs := findValidIPs(app, allApps, r.Host)
+	IPs := findValidIPs(app, allApps, r.URL.Hostname())
 	if len(IPs) == 0 {
-		log.Println("No valid local IPs for ", r.Host)
+		log.Println("No valid local IPs for ", r.URL.Hostname())
 		return false
 	}
 	var validIPs []string
@@ -265,8 +267,8 @@ func checkForLocalMatch(r *http.Request, app Datatypes.Application, allApps []Da
 	}
 
 	randomIP := validIPs[rand.Intn(len(validIPs))]
-	println("picked IP: ", randomIP, " for ", r.Host)
-	newURL, err := url.Parse(strings.Replace(r.URL.String(), r.Host, randomIP, 1))
+	println("picked IP: ", randomIP, " for ", r.URL.Hostname())
+	newURL, err := url.Parse(strings.Replace(r.URL.String(), r.URL.Hostname(), randomIP, 1))
 	if err != nil {
 		log.Println(err)
 		log.Println("Could not form new URL for proxied request")
@@ -352,9 +354,9 @@ func overlap(a, b []string) bool {
 }
 
 func checkForRemoteMatch(r *http.Request, app Datatypes.Application, allApps []Datatypes.Application) {
-	remoteApps := findValidRemoteApps(app, allApps, r.Host)
+	remoteApps := findValidRemoteApps(app, allApps, r.URL.Hostname())
 	if len(remoteApps) == 0 {
-		log.Println("No valid remoteApps for ", r.Host)
+		log.Println("No valid remoteApps for ", r.URL.Hostname())
 		return
 	}
 
@@ -380,17 +382,14 @@ func checkForRemoteMatch(r *http.Request, app Datatypes.Application, allApps []D
 	}
 
 	randomApp := validApps[rand.Intn(len(validApps))]
-	println("picked node: ", randomApp.Node, " for ", r.Host)
+	println("picked node: ", randomApp.Node, " for ", r.URL.Hostname())
 
 	oldPort := r.URL.Port()
 	if oldPort != "" {
 	} else {
 		oldPort = "80"
 	}
-	requestedHostname := r.URL.Host
-	if strings.Contains(requestedHostname, ":") {
-		requestedHostname = strings.Split(requestedHostname, ":")[0]
-	}
+	requestedHostname := r.URL.Hostname()
 	origRequest := r.URL.String()
 	newURL, err := url.Parse(fmt.Sprintf("http://%s:%s/%s/%s", ipForHost(randomApp.Node), "14442", randomApp.Name, requestedHostname))
 	if err != nil {
