@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/GodlikePenguin/agogos-datatypes"
+	datatypes "github.com/Ringleadr/ringleadr-datatypes"
 	"io"
 	"io/ioutil"
 	"log"
@@ -26,17 +26,17 @@ var hostCheck string
 
 type apps struct {
 	sync.Mutex
-	applications []Datatypes.Application
+	applications []datatypes.Application
 }
 
-func (a *apps) getApps() []Datatypes.Application {
+func (a *apps) getApps() []datatypes.Application {
 	a.Lock()
 	toReturn := a.applications
 	a.Unlock()
 	return toReturn
 }
 
-func (a *apps) setApps(app []Datatypes.Application) {
+func (a *apps) setApps(app []datatypes.Application) {
 	a.Lock()
 	a.applications = app
 	a.Unlock()
@@ -59,8 +59,6 @@ func (c *concurrentMap) setHosts(newHosts map[string]string) {
 	c.hosts = newHosts
 	c.Unlock()
 }
-
-
 
 func handleTunneling(w http.ResponseWriter, req *http.Request) {
 	_, err := net.LookupIP(req.Host)
@@ -181,7 +179,7 @@ func appWatcher() {
 			continue
 		}
 
-		var a []Datatypes.Application
+		var a []datatypes.Application
 		if err = json.Unmarshal(resp, &a); err != nil {
 			log.Println("Error unmarshalling json response: ", err.Error())
 			continue
@@ -194,7 +192,7 @@ func appWatcher() {
 			continue
 		}
 
-		var n []Datatypes.Node
+		var n []datatypes.Node
 		if err = json.Unmarshal(resp, &n); err != nil {
 			log.Println("Error unmarshalling json response: ", err.Error())
 			continue
@@ -237,7 +235,7 @@ func getRequest(address string) ([]byte, error) {
 	return body, nil
 }
 
-func checkForLocalMatch(r *http.Request, app Datatypes.Application, allApps []Datatypes.Application) bool {
+func checkForLocalMatch(r *http.Request, app datatypes.Application, allApps []datatypes.Application) bool {
 	IPs := findValidIPs(app, allApps, r.URL.Hostname())
 	if len(IPs) == 0 {
 		log.Println("No valid local IPs for ", r.URL.Hostname())
@@ -250,7 +248,7 @@ func checkForLocalMatch(r *http.Request, app Datatypes.Application, allApps []Da
 		if port == "" {
 			port = "80"
 		}
-		_, err := net.DialTimeout("tcp",fmt.Sprintf("%s:%s", IP, port), timeout)
+		_, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%s", IP, port), timeout)
 		if err != nil {
 			if strings.Contains(err.Error(), "i/o timeout") {
 				//If it's a timeout, we ignore this IP and assume it's gone down, and try to pick another one
@@ -279,10 +277,10 @@ func checkForLocalMatch(r *http.Request, app Datatypes.Application, allApps []Da
 	return true
 }
 
-func getMatchingApplication(apps []Datatypes.Application, address string) (Datatypes.Application, error) {
+func getMatchingApplication(apps []datatypes.Application, address string) (datatypes.Application, error) {
 	split := strings.Split(address, ":")
 	if len(split) != 2 {
-		return Datatypes.Application{}, errors.New("address should be in the form IP:PORT")
+		return datatypes.Application{}, errors.New("address should be in the form IP:PORT")
 	}
 	for _, app := range apps {
 		for _, comp := range app.Components {
@@ -297,10 +295,10 @@ func getMatchingApplication(apps []Datatypes.Application, address string) (Datat
 			}
 		}
 	}
-	return Datatypes.Application{}, errors.New("could not find app")
+	return datatypes.Application{}, errors.New("could not find app")
 }
 
-func findValidIPs(application Datatypes.Application, apps []Datatypes.Application, hostname string) []string {
+func findValidIPs(application datatypes.Application, apps []datatypes.Application, hostname string) []string {
 	//Check the implicit networks
 	var ret []string
 	for _, comp := range application.Components {
@@ -353,19 +351,19 @@ func overlap(a, b []string) bool {
 	return false
 }
 
-func checkForRemoteMatch(r *http.Request, app Datatypes.Application, allApps []Datatypes.Application) {
+func checkForRemoteMatch(r *http.Request, app datatypes.Application, allApps []datatypes.Application) {
 	remoteApps := findValidRemoteApps(app, allApps, r.URL.Hostname())
 	if len(remoteApps) == 0 {
 		log.Println("No valid remoteApps for ", r.URL.Hostname())
 		return
 	}
 
-	var validApps []Datatypes.Application
+	var validApps []datatypes.Application
 	for _, appl := range remoteApps {
 		timeout := time.Duration(500 * time.Millisecond)
 		//Checking for a remote proxy here so don't honor the host
 		port := "14442"
-		_, err := net.DialTimeout("tcp",fmt.Sprintf("%s:%s", ipForHost(appl.Node), port), timeout)
+		_, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%s", ipForHost(appl.Node), port), timeout)
 		if err != nil {
 			if strings.Contains(err.Error(), "i/o timeout") {
 				//If it's a timeout, we ignore this host and assume it's gone down, and try to pick another one
@@ -403,9 +401,9 @@ func checkForRemoteMatch(r *http.Request, app Datatypes.Application, allApps []D
 	r.Host = r.URL.Host
 }
 
-func findValidRemoteApps(application Datatypes.Application, apps []Datatypes.Application, hostname string) []Datatypes.Application {
+func findValidRemoteApps(application datatypes.Application, apps []datatypes.Application, hostname string) []datatypes.Application {
 	//Check for apps on a different node in the same network
-	var ret []Datatypes.Application
+	var ret []datatypes.Application
 	for _, app := range apps {
 		if app.Name == application.Name {
 			continue
